@@ -1,59 +1,67 @@
 # WSO2 Blockchain Node 05
 
-Node 05 is a sealer. It holds an authorized Clique signer account and produces
-blocks. It must not serve JSON-RPC traffic.
+Node 05 is an existing Clique sealer. For the controlled staging test, Choreo
+temporarily publishes its JSON-RPC endpoint for reads, transaction submission
+and contract deployment. Normal application traffic remains behind the
+approved load balancer, which provides authentication and rate limiting. The
+direct public endpoint must be disabled after the test.
 
 ## Choreo endpoints
 
 | Purpose | Port and protocol | Visibility |
 | --- | --- | --- |
+| JSON-RPC | `8545/TCP` (`REST`) | `Public` |
 | Geth peer sessions | `30303/TCP` | `Project` |
 | Geth peer discovery | `30303/UDP` | `Project` |
-| Geth metrics | `6060/TCP` (`REST`) | `Project` |
 
-There is deliberately no endpoint for JSON-RPC port `8545`.
+The former metrics endpoint on port `6060` is intentionally not published for
+this test. Chain progress and sealer participation are checked through
+JSON-RPC and the local IPC socket. A dedicated metrics endpoint can be restored
+later as a separate operational change if it is required.
 
 ## Runtime contract
 
 The executable startup script is mounted by Choreo at
-`/startup-scripts/node.sh`; it is not part of the container image. The deployed
-sealer configuration must meet all of the following requirements:
+`/startup-scripts/node.sh`; it is not part of the container image. The
+deployment must meet all of the following requirements:
 
-- Keep the existing `/data-directory` persistent volume. Never initialize over
-  an existing `geth/chaindata` directory.
-- Set `NODE_ROLE=sealer` and retain the approved key and password mounts.
-- Listen for P2P traffic on port `30303` and use the approved static peers.
-- When static peers are used, start Geth with `--nodiscover`. UDP remains
-  project-visible for compatibility with environments that still use discovery.
-- Do not use `--http`, `--http.addr`, `--http.port`, `--http.api` or
-  `--allow-insecure-unlock`. Administrative access is local IPC only.
-- Enable the dedicated metrics listener with
-  `--metrics --metrics.addr 0.0.0.0 --metrics.port 6060`.
-
-The security-relevant part of the Geth command must include:
-
-```sh
-geth \
-  --datadir /data-directory \
-  --ipcpath /startup-scripts/geth.ipc \
-  --networkid 10000 \
-  --nodiscover \
-  --port 30303 \
-  --mine \
-  --miner.etherbase "$ACCOUNT" \
-  --unlock "$ACCOUNT" \
-  --password /startup-scripts/password.txt \
-  --metrics \
-  --metrics.addr 0.0.0.0 \
-  --metrics.port 6060
-```
-
-This excerpt documents the security-sensitive flags and is not a replacement
-for the complete, reviewed startup script.
+- Preserve the existing `/data-directory` volume and never initialize over an
+  existing `geth/chaindata` directory.
+- Keep the approved Clique signer and static peer configuration.
+- Listen for P2P traffic on port `30303` and use `--nodiscover` with the
+  approved static peers.
+- Listen for JSON-RPC on port `8545` with only the required `eth`, `net` and
+  `web3` namespaces. Do not expose `admin`, `personal`, `debug`, `miner`,
+  `txpool` or `clique` over HTTP.
+- Keep the WSO2 token contract-owner private key outside the node. Owner
+  transactions must be signed with that external key before submission.
+- Treat JSON-RPC as transaction transport, not as authorization for the WSO2
+  token contract. Arbitrary users may submit their own signed transactions or
+  deploy their own contracts; the WSO2 contract continues to enforce its
+  owner-only operation on-chain.
+- This component does not filter methods inside the `eth` namespace. With Geth
+  1.13.15, an in-process sealer that enables HTTP must explicitly allow its
+  account to be unlocked, so `eth_sendTransaction` and `eth_sign` may use the
+  sealer account. This is an accepted, temporary staging exception; it is not
+  a production security control.
+- Keep the sealer account separate from the WSO2 contract owner. Before
+  deployment, verify that the sealer is not the value returned by `owner()`,
+  has no WSO2 token balance, and has no allowance from any known WSO2-funded
+  wallet. Stop the rollout without changing chain data if any check fails.
+- Keep administrative access local to the IPC socket.
 
 ## Verification
 
-Deploy one sealer at a time. Through local IPC, verify the expected signer,
-peer count and advancing canonical head. Confirm that
-`/debug/metrics/prometheus` responds on port `6060` from the Choreo project and
-that no public or project endpoint exists for port `8545`.
+Deploy one node at a time. Confirm that the existing chain data, WSO2 contract
+address and deployed bytecode are unchanged; the canonical head advances; peer
+connectivity remains healthy; and a signed staging transaction and an
+independent test-contract deployment are confirmed. Verify that:
+
+- `owner()` still returns the approved external owner address;
+- a non-owner call to `mintTokens` reverts;
+- the sealer has a zero WSO2 token balance and no allowance from known
+  WSO2-funded wallets;
+- the HTTP RPC modules exclude `admin`, `personal`, `debug`, `miner`, `txpool`
+  and `clique`;
+- recent blocks show expected sealer participation; and
+- port `6060` is not published.
